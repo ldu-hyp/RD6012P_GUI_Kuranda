@@ -1,0 +1,34 @@
+# Qt Creator / CMake
+CMakeLists.txt.user
+CMakeLists.txt.user.*
+build*/
+cmake-build-*/
+out/
+.vscode/
+.idea/
+
+# MSVC
+.vs/
+*.suo
+*.user
+*.VC.db
+*.VC.VC.opendb
+Debug/
+Release/
+x64/
+x86/
+
+# Generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.exe
+*.dll
+*.obj
+*.pdb
+*.ilk
+
+# OS
+Thumbs.db
+.DS_Store

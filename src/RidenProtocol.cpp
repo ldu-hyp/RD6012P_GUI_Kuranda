@@ -1,7 +1,6 @@
 #include "RidenProtocol.h"
 
 #include <QDateTime>
-#include <QtMath>
 
 namespace
 {
@@ -144,39 +143,35 @@ DeviceInfo decodeDeviceInfo(const QVector<quint16> &registers)
     return info;
 }
 
-DeviceSnapshot decodeSnapshot(const QVector<quint16> &r)
+DeviceSnapshot decodeLiveSnapshot(const QVector<quint16> &r)
 {
     DeviceSnapshot s;
     s.timestampMs = QDateTime::currentMSecsSinceEpoch();
 
-    // The polling block begins at Modbus register 0x0004.
-    if (r.size() < 17) {
+    // This optimized block is 0x0008..0x0014 (13 registers).
+    if (r.size() < 13) {
         return s;
     }
 
-    s.internalTemperatureC = (r.at(0) == 0 ? 1.0 : -1.0) * r.at(1);
-
-    s.currentRange = static_cast<int>(r.at(16));
+    s.currentRange = static_cast<int>(r.at(12));
     const double currentScale = (s.currentRange == 0) ? 10000.0 : 1000.0;
 
-    // RD6012P voltage resolution is 1 mV.
-    s.voltageSet = r.at(4) / 1000.0;
-    s.currentSet = r.at(5) / currentScale;
-    s.voltageOut = r.at(6) / 1000.0;
-    s.currentOut = r.at(7) / currentScale;
+    s.voltageSet = r.at(0) / 1000.0;
+    s.currentSet = r.at(1) / currentScale;
+    s.voltageOut = r.at(2) / 1000.0;
+    s.currentOut = r.at(3) / currentScale;
 
-    // Newer RD60xx implementations treat registers 12..13 as one 32-bit
-    // power display value, scaled by 0.01 W. Here r[8] == register 12.
-    const quint32 powerRaw = (static_cast<quint32>(r.at(8)) << 16)
-                             | static_cast<quint32>(r.at(9));
+    // RD6012P power spans registers 0x000C..0x000D.
+    const quint32 powerRaw = (static_cast<quint32>(r.at(4)) << 16)
+                             | static_cast<quint32>(r.at(5));
     s.powerOut = powerRaw / 100.0;
 
-    s.inputVoltage = r.at(10) / 100.0;
-    s.keypadLocked = r.at(11) != 0;
-    s.protection = static_cast<int>(r.at(12));
-    s.regulationMode = static_cast<int>(r.at(13));
-    s.outputEnabled = r.at(14) != 0;
-    s.preset = static_cast<int>(r.at(15));
+    s.inputVoltage = r.at(6) / 100.0;
+    s.keypadLocked = r.at(7) != 0;
+    s.protection = static_cast<int>(r.at(8));
+    s.regulationMode = static_cast<int>(r.at(9));
+    s.outputEnabled = r.at(10) != 0;
+    s.preset = static_cast<int>(r.at(11));
 
     return s;
 }

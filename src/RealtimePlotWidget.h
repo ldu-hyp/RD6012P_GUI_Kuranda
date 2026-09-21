@@ -4,6 +4,7 @@
 #include <QElapsedTimer>
 #include <QRectF>
 #include <QString>
+#include <QTimer>
 #include <QVector>
 #include <QWidget>
 
@@ -39,5 +40,6 @@ private:
 
     QVector<Sample> m_samples;
     QElapsedTimer m_clock;
+    QTimer m_renderTimer;
     int m_timeWindowSeconds = 60;
 };

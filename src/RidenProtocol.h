@@ -21,10 +21,14 @@ QByteArray writeSingleRegister(quint16 registerAddress, quint16 value);
 QVector<quint16> decodeReadRegisters(const QByteArray &frame, bool *ok = nullptr);
 DeviceInfo decodeDeviceInfo(const QVector<quint16> &registers);
 
-// Unified high-rate block: 0x0004..0x0014 (17 registers).
-// This contains temperature, setpoints, live V/I/P, input voltage,
-// protection/CV-CC/output/preset and RD6012P current range in ONE transaction.
-DeviceSnapshot decodeUnifiedSnapshot(const QVector<quint16> &registers);
+// One-time connection snapshot: 0x0004..0x0014.
+DeviceSnapshot decodeInitialSnapshot(const QVector<quint16> &registers);
+
+// High-rate path: 0x000A..0x000B only.
+// Power is deliberately calculated on the PC as V * I.
+void applyFastVI(const QVector<quint16> &registers,
+                 int currentRange,
+                 DeviceSnapshot &snapshot);
 
 QString modelNameFromId(quint16 productId);
 QString protectionText(int protection);

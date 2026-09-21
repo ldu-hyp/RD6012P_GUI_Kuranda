@@ -9,7 +9,6 @@ class QLabel;
 class QComboBox;
 class QPushButton;
 class QDoubleSpinBox;
-class QSpinBox;
 class RealtimePlotWidget;
 class SerialWorker;
 
@@ -59,6 +58,7 @@ private:
 
     bool m_connected = false;
     bool m_updatingControls = false;
+    int m_lastCurrentRange = -1;
 
     QComboBox *m_portCombo = nullptr;
     QPushButton *m_connectButton = nullptr;
@@ -77,6 +77,9 @@ private:
     QPushButton *m_outputButton = nullptr;
     QComboBox *m_rangeCombo = nullptr;
     QComboBox *m_pollCombo = nullptr;
+
+    QLabel *m_rateValue = nullptr;
+    QLabel *m_rttValue = nullptr;
 
     QLabel *m_modelValue = nullptr;
     QLabel *m_productIdValue = nullptr;

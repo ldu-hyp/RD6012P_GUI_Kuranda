@@ -87,7 +87,7 @@ private:
     bool m_hasCurrentRequest = false;
     bool m_connected = false;
 
-    int m_pollIntervalMs = 80;
+    int m_pollIntervalMs = 20;
     int m_currentRange = 0;
     int m_lastBacklight = -1;
 

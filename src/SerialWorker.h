@@ -46,7 +46,9 @@ private:
         DeviceInfo,
         Brightness,
         Temperature,
-        FastPoll,
+        SetpointPoll,
+        StatusPoll,
+        FastMeter,
         WriteVoltage,
         WriteCurrent,
         WriteOutput,
@@ -54,7 +56,7 @@ private:
     };
 
     struct Request {
-        RequestType type = RequestType::FastPoll;
+        RequestType type = RequestType::FastMeter;
         QByteArray frame;
         quint8 function = 0;
         quint16 startRegister = 0;
@@ -74,7 +76,8 @@ private:
     void scheduleNextPoll();
     int expectedFrameLength() const;
     void tryExtractFrame();
-    bool fastPollAlreadyPending() const;
+    bool fastMeterAlreadyPending() const;
+    void enqueueOneDueBackgroundRead();
 
     QSerialPort *m_serial = nullptr;
     QTimer *m_timeoutTimer = nullptr;
@@ -88,19 +91,23 @@ private:
     bool m_hasCurrentRequest = false;
     bool m_connected = false;
 
-    // 0 means back-to-back requests. The device response time becomes the
-    // dominant limiter instead of an arbitrary host-side delay.
     int m_pollIntervalMs = 0;
     int m_currentRange = 0;
     int m_lastBacklight = -1;
-    double m_lastTemperatureC = 0.0;
 
+    DeviceSnapshot m_cachedSnapshot;
+
+    QElapsedTimer m_statusClock;
+    QElapsedTimer m_setpointClock;
     QElapsedTimer m_temperatureClock;
     QElapsedTimer m_rateClock;
     QElapsedTimer m_requestClock;
+
     int m_rateSampleCount = 0;
     double m_liveRateHz = 0.0;
 
     static constexpr int kRequestTimeoutMs = 350;
+    static constexpr int kStatusIntervalMs = 250;
+    static constexpr int kSetpointIntervalMs = 500;
     static constexpr int kTemperatureIntervalMs = 1000;
 };

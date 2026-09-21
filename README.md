@@ -1,10 +1,10 @@
 # RD6012P GUI Kuranda
 
-A native C++ / Qt 6 desktop control application for the RIDEN RD6012P programmable DC power supply.
+Native C++ / Qt 6 desktop controller for the RIDEN RD6012P programmable power supply.
 
 ## Version
 
-First functional prototype: v0.1.0
+v0.2.0 — low-latency acquisition update
 
 Target environment:
 
@@ -15,103 +15,147 @@ Target environment:
 - CMake
 - C++17
 
-Qt modules required:
+Required Qt modules:
 
 - Core
 - Gui
 - Widgets
 - SerialPort
 
-No Qt Charts dependency is required. The real-time plot is custom-painted to keep rendering overhead small.
+No Qt Charts dependency is used. The graph is custom-painted.
 
-## First-version features
+## Current features
 
-- 115200 8N1 serial connection
-- RIDEN startup probe: queryd + CR/LF
-- Modbus RTU CRC16 framing
-- Reads product ID, serial number and firmware version
-- RD6012P product-ID recognition
-- Fast asynchronous polling of registers 0x0004..0x0029
-- Live output voltage, current and power
-- Live input voltage, internal temperature, CV/CC, protection, preset and keypad lock
-- RD6012P 6 A / 12 A current-range handling
+- RIDEN startup probe: `queryd\r\n`
+- Modbus RTU over 115200 8N1
+- CRC16 validation
+- Product ID, serial number and firmware information
+- RD6012P identification
 - Set voltage
 - Set current
 - Output ON/OFF
-- Current-range switching
-- User-selectable polling delay
-- Three-lane live graph for voltage/current/power
-- Serial I/O runs in a dedicated QThread
-- User write commands have priority over background polling
-- One outstanding Modbus transaction at a time, with timeout and one retry
+- 6 A / 12 A current-range switching
+- Live V / I / P meters
+- Live V / I / P graph
+- Input voltage
+- Internal temperature
+- CV / CC
+- Protection status
+- Preset and keypad-lock state
+- Actual update-rate display
+- Serial round-trip-time display
+- User writes pre-empt background polling
+- Timeout and one automatic retry
 
-## Build with Qt Creator
+## v0.2 low-latency architecture
 
-1. Install Qt 6.8.x MSVC 2022 64-bit and the Qt Serial Port module.
-2. Open CMakeLists.txt in Qt Creator.
-3. Select a Qt 6.8 MSVC 2022 64-bit kit.
-4. Configure the project.
-5. Build and run.
+The original prototype read registers `0x0004..0x0029` on every cycle. That returned 81 bytes and also caused the GUI to refresh many controls on every measurement.
 
-## Protocol notes
+v0.2 uses multi-rate acquisition.
 
-The application is tuned for RD6012P.
+### High-rate meter path
 
-Observed/used register layout:
+The continuous hot path reads only:
 
 | Register | Meaning |
 | --- | --- |
-| 0 | Product ID |
-| 1..2 | Serial number |
-| 3 | Firmware version |
-| 4..7 | Internal temperature |
-| 8 | Voltage set |
-| 9 | Current set |
-| 10 | Output voltage |
-| 11 | Output current |
-| 12..13 | Power display value |
-| 14 | Input voltage |
-| 15 | Keypad lock |
-| 16 | Protection |
-| 17 | CV/CC |
-| 18 | Output enable |
-| 19 | Preset |
-| 20 | RD6012P current range |
-| 72 / 0x48 | Backlight |
+| 0x000A | Output voltage |
+| 0x000B | Output current |
+| 0x000C..0x000D | Output power |
 
-RD6012P scaling used by this build:
+Request:
+
+```
+01 03 00 0A 00 04 ...
+```
+
+The Modbus response is only 13 bytes instead of 81 bytes.
+
+In **Maximum — continuous** mode there is no artificial host-side polling delay. The next meter transaction is scheduled immediately after the previous transaction completes.
+
+### Medium-rate status path
+
+Every approximately 250 ms the application reads:
+
+```
+0x000E..0x0014
+```
+
+This updates:
+
+- input voltage
+- keypad lock
+- protection state
+- CV/CC
+- output ON/OFF
+- preset
+- RD6012P 6 A / 12 A range
+
+### Setpoint path
+
+Every approximately 500 ms:
+
+```
+0x0008..0x0009
+```
+
+updates V-SET and I-SET.
+
+### Temperature path
+
+Every approximately 1000 ms:
+
+```
+0x0004..0x0005
+```
+
+updates the internal temperature.
+
+Only one lower-rate transaction is inserted between meter transactions at a time, preventing long gaps in the graph.
+
+## UI performance
+
+The GUI thread never blocks on serial I/O.
+
+QSerialPort and all Modbus scheduling run in a dedicated QThread.
+
+The UI no longer blindly writes every label and spin box on every sample. Widgets are only updated when their displayed value changes. Set-point spin boxes are not overwritten while the user is editing them.
+
+The graph render cadence is independent from the instrument sampling cadence. It renders at approximately 60 FPS, so the time axis scrolls smoothly while all plotted values remain real samples received from the RD6012P; no fake interpolation is performed.
+
+## Acquisition modes
+
+- Maximum — continuous: 0 ms host idle
+- Fast: 20 ms host idle
+- Balanced: 100 ms host idle
+- Slow: 500 ms host idle
+
+The **Actual update rate** and **Last round trip** fields show the real performance obtained from the connected power supply.
+
+If the displayed update rate remains low in Maximum mode, the limiting factor is then primarily the RD6012P / USB-serial response latency rather than the GUI timer.
+
+## RD6012P scaling
 
 - Voltage: 0.001 V/LSB
-- Current, 6 A range: 0.0001 A/LSB
-- Current, 12 A range: 0.001 A/LSB
+- Current in 6 A range: 0.0001 A/LSB
+- Current in 12 A range: 0.001 A/LSB
 - Input voltage: 0.01 V/LSB
-- Power: 0.01 W/LSB on the combined 32-bit value in registers 12..13
+- Power: 32-bit value across 0x000C..0x000D, interpreted as 0.01 W/LSB
 
-## Low-latency design
+## Build in Qt Creator
 
-The GUI thread never waits for serial I/O. QSerialPort, transaction scheduling, CRC checking and timeouts all run in a dedicated worker thread.
+1. Install Qt 6.8.x MSVC 2022 64-bit.
+2. Install the Qt Serial Port module.
+3. Open the root `CMakeLists.txt` in Qt Creator.
+4. Select the Qt 6.8 / MSVC 2022 64-bit kit.
+5. Configure.
+6. Build.
+7. Run.
 
-Polling is transaction-driven rather than blindly timer-driven: a new read is only started after the previous request completes. This prevents request overlap even if the device takes longer than the selected poll delay.
+## Hardware-test note
 
-User writes are placed in a priority queue. A voltage/current/output command therefore runs before the next background state read, and the application requests an immediate verification poll after the write acknowledgement.
+The project is specifically being developed against RD6012P V1.55 communication captures.
 
-The default poll delay is 20 ms. Actual update rate is limited by the RD6012P response latency plus this delay; it never sends overlapping Modbus requests.
+For first hardware tests, use conservative voltage/current limits and a non-critical load.
 
-## Important
-
-This is the first prototype and should initially be tested with a safe voltage/current limit and a non-critical load.
-
-The public RD60xx protocol documentation has some historical disagreement around the power-related registers. This implementation uses the newer 32-bit power interpretation for registers 12..13. We will verify this against RD6012P V1.55 hardware capture data in the next iteration.
-
-## Planned next iterations
-
-- OVP/OCP configuration
-- M0-M9 presets
-- CSV recording/export
-- Min/max/average statistics
-- Configurable graph time window
-- Graph zoom/pan and cursor readout
-- Raw Modbus traffic console
-- Auto reconnect
-- Device clock and additional settings
-- More detailed error/timeout statistics
+The public RD60xx documentation has historical disagreement around the power-register interpretation. This code currently uses the 32-bit interpretation across registers 0x000C..0x000D and should continue to be cross-checked against real RD6012P V1.55 measurements.

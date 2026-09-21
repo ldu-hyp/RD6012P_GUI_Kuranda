@@ -4,7 +4,7 @@ Native C++ / Qt 6 desktop controller for the RIDEN RD6012P programmable power su
 
 ## Version
 
-v0.2.0 — low-latency acquisition update
+v0.2.1 — unified low-latency polling
 
 Target environment:
 
@@ -47,71 +47,43 @@ No Qt Charts dependency is used. The graph is custom-painted.
 - User writes pre-empt background polling
 - Timeout and one automatic retry
 
-## v0.2 low-latency architecture
+## v0.2.1 low-latency architecture
 
-The original prototype read registers `0x0004..0x0029` on every cycle. That returned 81 bytes and also caused the GUI to refresh many controls on every measurement.
+Real hardware testing showed an important RD6012P characteristic:
 
-v0.2 uses multi-rate acquisition.
+- a small Modbus transaction still takes about 119 ms round trip
+- therefore splitting live data into several small reads reduces total update rate
+- 1000 / 119 ms is only about 8.4 transactions/s before any additional overhead
 
-### High-rate meter path
+v0.2.1 therefore uses one continuous live transaction instead of separate meter/status/setpoint/temperature reads.
 
-The continuous hot path reads only:
+### Unified high-rate read
 
-| Register | Meaning |
-| --- | --- |
-| 0x000A | Output voltage |
-| 0x000B | Output current |
-| 0x000C..0x000D | Output power |
-
-Request:
+Every live cycle reads:
 
 ```
-01 03 00 0A 00 04 ...
+0x0004..0x0014
 ```
 
-The Modbus response is only 13 bytes instead of 81 bytes.
+This is 17 registers and includes:
 
-In **Maximum — continuous** mode there is no artificial host-side polling delay. The next meter transaction is scheduled immediately after the previous transaction completes.
-
-### Medium-rate status path
-
-Every approximately 250 ms the application reads:
-
-```
-0x000E..0x0014
-```
-
-This updates:
-
+- internal temperature
+- V-SET / I-SET
+- V-OUT / I-OUT
+- output power
 - input voltage
 - keypad lock
 - protection state
-- CV/CC
-- output ON/OFF
+- CV / CC
+- output ON / OFF
 - preset
-- RD6012P 6 A / 12 A range
+- 6 A / 12 A range
 
-### Setpoint path
+The Modbus response is 39 bytes.
 
-Every approximately 500 ms:
+In **Maximum — continuous** mode the next unified request is started immediately after the previous response is processed. No additional status transactions are inserted between live samples.
 
-```
-0x0008..0x0009
-```
-
-updates V-SET and I-SET.
-
-### Temperature path
-
-Every approximately 1000 ms:
-
-```
-0x0004..0x0005
-```
-
-updates the internal temperature.
-
-Only one lower-rate transaction is inserted between meter transactions at a time, preventing long gaps in the graph.
+On hardware that reports roughly 119 ms round trip, the expected practical ceiling is around 7-8 updates/s. The exact value depends on the RD6012P firmware and USB/serial path.
 
 ## UI performance
 
@@ -132,7 +104,7 @@ The graph render cadence is independent from the instrument sampling cadence. It
 
 The **Actual update rate** and **Last round trip** fields show the real performance obtained from the connected power supply.
 
-If the displayed update rate remains low in Maximum mode, the limiting factor is then primarily the RD6012P / USB-serial response latency rather than the GUI timer.
+If the displayed update rate remains low in Maximum mode, compare it with 1000 / RTT. For example, 119 ms RTT corresponds to an absolute transaction ceiling of about 8.4 Hz. A measured rate near 7-8 Hz is therefore already close to the device/link limit.
 
 ## RD6012P scaling
 

@@ -143,39 +143,53 @@ DeviceInfo decodeDeviceInfo(const QVector<quint16> &registers)
     return info;
 }
 
-DeviceSnapshot decodeUnifiedSnapshot(const QVector<quint16> &r)
+DeviceSnapshot decodeInitialSnapshot(const QVector<quint16> &r)
 {
     DeviceSnapshot s;
     s.timestampMs = QDateTime::currentMSecsSinceEpoch();
 
-    // Block starts at 0x0004 and ends at 0x0014 inclusive.
     if (r.size() < 17) {
         return s;
     }
 
     s.internalTemperatureC = (r.at(0) == 0 ? 1.0 : -1.0) * r.at(1);
-
-    // Register 0x0014 determines the RD6012P current scaling.
     s.currentRange = static_cast<int>(r.at(16));
+
     const double currentScale = (s.currentRange == 0) ? 10000.0 : 1000.0;
 
-    s.voltageSet = r.at(4) / 1000.0;     // 0x0008
-    s.currentSet = r.at(5) / currentScale; // 0x0009
-    s.voltageOut = r.at(6) / 1000.0;     // 0x000A
-    s.currentOut = r.at(7) / currentScale; // 0x000B
+    s.voltageSet = r.at(4) / 1000.0;
+    s.currentSet = r.at(5) / currentScale;
+    s.voltageOut = r.at(6) / 1000.0;
+    s.currentOut = r.at(7) / currentScale;
 
-    const quint32 powerRaw = (static_cast<quint32>(r.at(8)) << 16)
-                             | static_cast<quint32>(r.at(9));
-    s.powerOut = powerRaw / 100.0;        // 0x000C..0x000D
+    // v0.2.2 intentionally does not use the device power registers.
+    s.powerOut = s.voltageOut * s.currentOut;
 
-    s.inputVoltage = r.at(10) / 100.0;    // 0x000E
-    s.keypadLocked = r.at(11) != 0;       // 0x000F
-    s.protection = static_cast<int>(r.at(12)); // 0x0010
-    s.regulationMode = static_cast<int>(r.at(13)); // 0x0011
-    s.outputEnabled = r.at(14) != 0;      // 0x0012
-    s.preset = static_cast<int>(r.at(15)); // 0x0013
+    s.inputVoltage = r.at(10) / 100.0;
+    s.keypadLocked = r.at(11) != 0;
+    s.protection = static_cast<int>(r.at(12));
+    s.regulationMode = static_cast<int>(r.at(13));
+    s.outputEnabled = r.at(14) != 0;
+    s.preset = static_cast<int>(r.at(15));
 
     return s;
+}
+
+void applyFastVI(const QVector<quint16> &r,
+                 int currentRange,
+                 DeviceSnapshot &s)
+{
+    if (r.size() < 2) {
+        return;
+    }
+
+    const double currentScale = (currentRange == 0) ? 10000.0 : 1000.0;
+
+    s.timestampMs = QDateTime::currentMSecsSinceEpoch();
+    s.currentRange = currentRange;
+    s.voltageOut = r.at(0) / 1000.0;
+    s.currentOut = r.at(1) / currentScale;
+    s.powerOut = s.voltageOut * s.currentOut;
 }
 
 QString protectionText(int protection)

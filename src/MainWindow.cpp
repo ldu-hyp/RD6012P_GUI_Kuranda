@@ -313,7 +313,7 @@ QWidget *MainWindow::createRightPanel()
     auto *performanceGroup = new QGroupBox(tr("Acquisition"));
     auto *performanceForm = new QFormLayout(performanceGroup);
     m_pollCombo = new QComboBox;
-    m_pollCombo->addItem(tr("Maximum — continuous"), 0);
+    m_pollCombo->addItem(tr("Maximum — V/I only"), 0);
     m_pollCombo->addItem(tr("Fast — 20 ms idle"), 20);
     m_pollCombo->addItem(tr("Balanced — 100 ms idle"), 100);
     m_pollCombo->addItem(tr("Slow — 500 ms idle"), 500);

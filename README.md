@@ -4,7 +4,7 @@ Native C++ / Qt 6 desktop controller for the RIDEN RD6012P programmable power su
 
 ## Version
 
-v0.2.1 — unified low-latency polling
+v0.2.2 — minimal V/I polling
 
 Target environment:
 
@@ -35,55 +35,119 @@ No Qt Charts dependency is used. The graph is custom-painted.
 - Set current
 - Output ON/OFF
 - 6 A / 12 A current-range switching
-- Live V / I / P meters
+- Live output voltage/current
+- PC-side power calculation: `P = V * I`
 - Live V / I / P graph
-- Input voltage
-- Internal temperature
-- CV / CC
-- Protection status
-- Preset and keypad-lock state
+- Initial connection snapshot for input voltage, internal temperature, CV/CC, protection, preset and keypad lock
 - Actual update-rate display
 - Serial round-trip-time display
 - User writes pre-empt background polling
 - Timeout and one automatic retry
 
-## v0.2.1 low-latency architecture
+## v0.2.2 acquisition architecture
 
-Real hardware testing showed an important RD6012P characteristic:
+Real RD6012P V1.55 testing showed approximately:
 
-- a small Modbus transaction still takes about 119 ms round trip
-- therefore splitting live data into several small reads reduces total update rate
-- 1000 / 119 ms is only about 8.4 transactions/s before any additional overhead
+- 8.4 Hz update rate
+- 121 ms transaction round trip
 
-v0.2.1 therefore uses one continuous live transaction instead of separate meter/status/setpoint/temperature reads.
+This indicates that most latency is inside the device / USB-serial transaction path rather than caused by the amount of returned Modbus data.
 
-### Unified high-rate read
+v0.2.2 therefore minimizes the continuous live transaction as far as possible.
 
-Every live cycle reads:
+### Startup only
+
+At connection time the application reads:
 
 ```
 0x0004..0x0014
 ```
 
-This is 17 registers and includes:
+once to obtain:
 
 - internal temperature
 - V-SET / I-SET
-- V-OUT / I-OUT
-- output power
+- current range
 - input voltage
-- keypad lock
-- protection state
 - CV / CC
-- output ON / OFF
+- protection
+- output state
 - preset
-- 6 A / 12 A range
+- keypad lock
+- initial VOUT / IOUT
 
-The Modbus response is 39 bytes.
+The current range is required because RD6012P current scaling differs between the 6 A and 12 A ranges.
 
-In **Maximum — continuous** mode the next unified request is started immediately after the previous response is processed. No additional status transactions are inserted between live samples.
+### Continuous high-rate path
 
-On hardware that reports roughly 119 ms round trip, the expected practical ceiling is around 7-8 updates/s. The exact value depends on the RD6012P firmware and USB/serial path.
+After startup, continuous acquisition reads only:
+
+```
+0x000A..0x000B
+```
+
+which contains:
+
+- 0x000A — VOUT
+- 0x000B — IOUT
+
+Request size: 8 bytes.
+
+Response size: 9 bytes.
+
+Power is not read from the RD6012P. It is calculated locally:
+
+```
+P = VOUT * IOUT
+```
+
+This removes the power registers and all other status registers from the high-rate communication path.
+
+### Write commands
+
+Voltage, current, output and range writes still use Modbus function 0x06.
+
+After an acknowledged write, the application updates its cached state from the echoed Modbus value and immediately resumes V/I acquisition. It does **not** insert an additional verification read, because one extra request costs roughly another full device transaction period.
+
+## Important behavior in maximum-speed mode
+
+The acquisition selector now shows:
+
+```
+Maximum — V/I only
+```
+
+In this mode:
+
+- VOUT and IOUT are live
+- power is calculated live on the PC
+- set values changed through this GUI are kept in sync from write acknowledgements
+- output/range changes made through this GUI are kept in sync from write acknowledgements
+- temperature, input voltage, CV/CC, protection, preset and keypad-lock values are connection-time snapshots
+
+If these latter values are changed from the RD6012P front panel while the GUI is connected, the GUI does not spend extra transactions refreshing them. This is intentional to preserve the maximum possible V/I sample rate.
+
+## Expected speed improvement
+
+At 115200 baud:
+
+Previous unified transaction:
+
+- request: 8 bytes
+- response: 39 bytes
+- total wire data: 47 bytes
+- ideal wire time: about 4.1 ms
+
+v0.2.2 V/I-only transaction:
+
+- request: 8 bytes
+- response: 9 bytes
+- total wire data: 17 bytes
+- ideal wire time: about 1.5 ms
+
+So only about 2.6 ms of serial wire time is removed.
+
+Because the measured total RTT is about 121 ms, the expected update-rate increase is modest. The important test is whether the RD6012P itself responds measurably faster to a two-register request.
 
 ## UI performance
 
@@ -91,20 +155,18 @@ The GUI thread never blocks on serial I/O.
 
 QSerialPort and all Modbus scheduling run in a dedicated QThread.
 
-The UI no longer blindly writes every label and spin box on every sample. Widgets are only updated when their displayed value changes. Set-point spin boxes are not overwritten while the user is editing them.
+Widgets are updated only when their displayed value changes, and set-point editors are not overwritten while the user is editing them.
 
-The graph render cadence is independent from the instrument sampling cadence. It renders at approximately 60 FPS, so the time axis scrolls smoothly while all plotted values remain real samples received from the RD6012P; no fake interpolation is performed.
+The graph rendering cadence is independent from the instrument sampling cadence and renders at approximately 60 FPS. No fake measurement interpolation is used.
 
 ## Acquisition modes
 
-- Maximum — continuous: 0 ms host idle
+- Maximum — V/I only: 0 ms host idle
 - Fast: 20 ms host idle
 - Balanced: 100 ms host idle
 - Slow: 500 ms host idle
 
-The **Actual update rate** and **Last round trip** fields show the real performance obtained from the connected power supply.
-
-If the displayed update rate remains low in Maximum mode, compare it with 1000 / RTT. For example, 119 ms RTT corresponds to an absolute transaction ceiling of about 8.4 Hz. A measured rate near 7-8 Hz is therefore already close to the device/link limit.
+The **Actual update rate** and **Last round trip** fields show the real hardware/link performance.
 
 ## RD6012P scaling
 
@@ -112,7 +174,6 @@ If the displayed update rate remains low in Maximum mode, compare it with 1000 /
 - Current in 6 A range: 0.0001 A/LSB
 - Current in 12 A range: 0.001 A/LSB
 - Input voltage: 0.01 V/LSB
-- Power: 32-bit value across 0x000C..0x000D, interpreted as 0.01 W/LSB
 
 ## Build in Qt Creator
 
@@ -126,8 +187,6 @@ If the displayed update rate remains low in Maximum mode, compare it with 1000 /
 
 ## Hardware-test note
 
-The project is specifically being developed against RD6012P V1.55 communication captures.
+This project is being tuned using real RD6012P V1.55 communication captures.
 
-For first hardware tests, use conservative voltage/current limits and a non-critical load.
-
-The public RD60xx documentation has historical disagreement around the power-register interpretation. This code currently uses the 32-bit interpretation across registers 0x000C..0x000D and should continue to be cross-checked against real RD6012P V1.55 measurements.
+For first tests after an update, use conservative voltage/current limits and a non-critical load.

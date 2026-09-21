@@ -305,9 +305,9 @@ QWidget *MainWindow::createRightPanel()
     auto *performanceGroup = new QGroupBox(tr("Acquisition"));
     auto *performanceForm = new QFormLayout(performanceGroup);
     m_pollCombo = new QComboBox;
-    m_pollCombo->addItem(tr("Ultra fast — 80 ms"), 80);
-    m_pollCombo->addItem(tr("Fast — 150 ms"), 150);
-    m_pollCombo->addItem(tr("Balanced — 300 ms"), 300);
+    m_pollCombo->addItem(tr("Ultra fast — 20 ms"), 20);
+    m_pollCombo->addItem(tr("Fast — 80 ms"), 80);
+    m_pollCombo->addItem(tr("Balanced — 200 ms"), 200);
     m_pollCombo->addItem(tr("Slow — 1000 ms"), 1000);
     performanceForm->addRow(tr("Poll delay"), m_pollCombo);
 

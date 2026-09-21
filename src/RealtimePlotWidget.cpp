@@ -10,14 +10,24 @@ RealtimePlotWidget::RealtimePlotWidget(QWidget *parent)
 {
     setMinimumSize(560, 360);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    setAttribute(Qt::WA_OpaquePaintEvent, true);
+
     m_clock.start();
+
+    // Rendering cadence is decoupled from the instrument sample cadence.
+    // The graph scrolls smoothly at ~60 FPS without inventing/interpolating
+    // measurement samples.
+    m_renderTimer.setInterval(16);
+    m_renderTimer.setTimerType(Qt::PreciseTimer);
+    connect(&m_renderTimer, &QTimer::timeout,
+            this, QOverload<>::of(&RealtimePlotWidget::update));
+    m_renderTimer.start();
 }
 
 void RealtimePlotWidget::addSample(double voltage, double current, double power)
 {
     m_samples.push_back({m_clock.elapsed(), voltage, current, power});
     trimSamples();
-    update();
 }
 
 void RealtimePlotWidget::clear()

@@ -35,6 +35,10 @@ struct DeviceSnapshot
     bool outputEnabled = false;
     int preset = 0;
     int currentRange = 0; // RD6012P: 0=6 A, 1=12 A
+
+    // Diagnostics for evaluating real hardware responsiveness.
+    double updateRateHz = 0.0;
+    double roundTripMs = 0.0;
 };
 
 Q_DECLARE_METATYPE(DeviceInfo)

@@ -3,6 +3,7 @@
 #include "DeviceData.h"
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QObject>
 #include <QQueue>
 #include <QSerialPort>
@@ -44,7 +45,8 @@ private:
     enum class RequestType {
         DeviceInfo,
         Brightness,
-        PollState,
+        Temperature,
+        FastPoll,
         WriteVoltage,
         WriteCurrent,
         WriteOutput,
@@ -52,7 +54,7 @@ private:
     };
 
     struct Request {
-        RequestType type = RequestType::PollState;
+        RequestType type = RequestType::FastPoll;
         QByteArray frame;
         quint8 function = 0;
         quint16 startRegister = 0;
@@ -72,9 +74,8 @@ private:
     void scheduleNextPoll();
     int expectedFrameLength() const;
     void tryExtractFrame();
+    bool fastPollAlreadyPending() const;
 
-    // Heap-allocated QObject children move together with SerialWorker when it
-    // is moved to the dedicated serial thread.
     QSerialPort *m_serial = nullptr;
     QTimer *m_timeoutTimer = nullptr;
     QTimer *m_pollTimer = nullptr;
@@ -87,9 +88,19 @@ private:
     bool m_hasCurrentRequest = false;
     bool m_connected = false;
 
-    int m_pollIntervalMs = 20;
+    // 0 means back-to-back requests. The device response time becomes the
+    // dominant limiter instead of an arbitrary host-side delay.
+    int m_pollIntervalMs = 0;
     int m_currentRange = 0;
     int m_lastBacklight = -1;
+    double m_lastTemperatureC = 0.0;
+
+    QElapsedTimer m_temperatureClock;
+    QElapsedTimer m_rateClock;
+    QElapsedTimer m_requestClock;
+    int m_rateSampleCount = 0;
+    double m_liveRateHz = 0.0;
 
     static constexpr int kRequestTimeoutMs = 350;
+    static constexpr int kTemperatureIntervalMs = 1000;
 };

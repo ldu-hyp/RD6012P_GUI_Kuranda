@@ -1,8 +1,13 @@
 #pragma once
 
+#include <QColor>
 #include <QElapsedTimer>
+#include <QRectF>
+#include <QString>
 #include <QVector>
 #include <QWidget>
+
+class QPainter;
 
 class RealtimePlotWidget final : public QWidget
 {

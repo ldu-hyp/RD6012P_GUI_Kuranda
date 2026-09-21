@@ -54,6 +54,8 @@ void SerialWorker::openPort(const QString &portName)
     m_hasCurrentRequest = false;
     m_connected = true;
     m_currentRange = 0;
+    m_lastBacklight = -1;
+    m_cachedSnapshot = DeviceSnapshot{};
     m_rateSampleCount = 0;
     m_liveRateHz = 0.0;
     m_rateClock.start();
@@ -69,10 +71,15 @@ void SerialWorker::openPort(const QString &portName)
             return;
         }
 
+        // One-time startup reads. After InitialState completes, continuous
+        // acquisition reads only VOUT and IOUT.
         enqueueRead(0x0000, 0x0004, RequestType::DeviceInfo,
                     tr("Read device information"), true);
+        enqueueRead(0x0004, 0x0011, RequestType::InitialState,
+                    tr("Read initial device state"), false);
         enqueueRead(0x0048, 0x0001, RequestType::Brightness,
                     tr("Read backlight"), false);
+
         runNextRequest();
     });
 }
@@ -96,15 +103,15 @@ void SerialWorker::closePort()
     }
 }
 
-bool SerialWorker::unifiedPollAlreadyPending() const
+bool SerialWorker::fastVIPollAlreadyPending() const
 {
     if (m_hasCurrentRequest
-        && m_currentRequest.type == RequestType::UnifiedPoll) {
+        && m_currentRequest.type == RequestType::FastVI) {
         return true;
     }
 
     for (const Request &request : m_normalQueue) {
-        if (request.type == RequestType::UnifiedPoll) {
+        if (request.type == RequestType::FastVI) {
             return true;
         }
     }
@@ -119,14 +126,12 @@ void SerialWorker::requestImmediatePoll()
 
     m_pollTimer->stop();
 
-    if (!unifiedPollAlreadyPending()) {
-        // One transaction contains every frequently displayed value:
-        // 0x0004..0x0014 = 17 registers, 39-byte Modbus response.
-        // With the measured ~119 ms device transaction latency, avoiding
-        // extra status/setpoint/temperature transactions is much faster than
-        // splitting the data into smaller reads.
-        enqueueRead(0x0004, 0x0011, RequestType::UnifiedPoll,
-                    tr("Read live state"), false);
+    if (!fastVIPollAlreadyPending()) {
+        // Absolute minimum live payload required by the GUI:
+        // 0x000A = VOUT, 0x000B = IOUT.
+        // Response: address + function + byte count + 4 data bytes + CRC = 9 B.
+        enqueueRead(0x000A, 0x0002, RequestType::FastVI,
+                    tr("Read voltage/current"), false);
     }
 
     runNextRequest();
@@ -211,7 +216,6 @@ void SerialWorker::enqueueWrite(quint16 reg, quint16 value,
     request.count = 1;
     request.description = description;
 
-    // User control commands always pre-empt background polling.
     m_priorityQueue.enqueue(request);
     m_pollTimer->stop();
     runNextRequest();
@@ -312,6 +316,40 @@ void SerialWorker::tryExtractFrame()
     }
 }
 
+void SerialWorker::applyAcknowledgedWriteToCache()
+{
+    // Modbus function 0x06 echoes the requested value in bytes 4..5.
+    const quint16 value =
+        (static_cast<quint16>(
+             static_cast<quint8>(m_currentRequest.frame.at(4))) << 8)
+        | static_cast<quint16>(
+              static_cast<quint8>(m_currentRequest.frame.at(5)));
+
+    switch (m_currentRequest.type) {
+    case RequestType::WriteVoltage:
+        m_cachedSnapshot.voltageSet = value / 1000.0;
+        break;
+
+    case RequestType::WriteCurrent: {
+        const double scale = (m_currentRange == 0) ? 10000.0 : 1000.0;
+        m_cachedSnapshot.currentSet = value / scale;
+        break;
+    }
+
+    case RequestType::WriteOutput:
+        m_cachedSnapshot.outputEnabled = value != 0;
+        break;
+
+    case RequestType::WriteRange:
+        m_currentRange = (value == 0) ? 0 : 1;
+        m_cachedSnapshot.currentRange = m_currentRange;
+        break;
+
+    default:
+        break;
+    }
+}
+
 void SerialWorker::completeCurrentRequest(const QByteArray &frame)
 {
     m_timeoutTimer->stop();
@@ -349,32 +387,38 @@ void SerialWorker::completeCurrentRequest(const QByteArray &frame)
             emit deviceInfoReceived(RidenProtocol::decodeDeviceInfo(regs));
             break;
 
+        case RequestType::InitialState:
+            m_cachedSnapshot = RidenProtocol::decodeInitialSnapshot(regs);
+            m_currentRange = m_cachedSnapshot.currentRange;
+            m_cachedSnapshot.roundTripMs = roundTripMs;
+            emit snapshotReceived(m_cachedSnapshot);
+            break;
+
         case RequestType::Brightness:
             if (!regs.isEmpty()) {
                 m_lastBacklight = regs.first();
             }
             break;
 
-        case RequestType::UnifiedPoll: {
-            DeviceSnapshot snapshot =
-                RidenProtocol::decodeUnifiedSnapshot(regs);
-            m_currentRange = snapshot.currentRange;
-            snapshot.roundTripMs = roundTripMs;
+        case RequestType::FastVI:
+            RidenProtocol::applyFastVI(
+                regs, m_currentRange, m_cachedSnapshot);
+            m_cachedSnapshot.roundTripMs = roundTripMs;
 
             ++m_rateSampleCount;
-            const qint64 rateElapsed = m_rateClock.elapsed();
-            if (rateElapsed >= 500) {
-                m_liveRateHz =
-                    static_cast<double>(m_rateSampleCount) * 1000.0
-                    / static_cast<double>(rateElapsed);
-                m_rateSampleCount = 0;
-                m_rateClock.restart();
+            {
+                const qint64 rateElapsed = m_rateClock.elapsed();
+                if (rateElapsed >= 500) {
+                    m_liveRateHz =
+                        static_cast<double>(m_rateSampleCount) * 1000.0
+                        / static_cast<double>(rateElapsed);
+                    m_rateSampleCount = 0;
+                    m_rateClock.restart();
+                }
             }
-            snapshot.updateRateHz = m_liveRateHz;
-
-            emit snapshotReceived(snapshot);
+            m_cachedSnapshot.updateRateHz = m_liveRateHz;
+            emit snapshotReceived(m_cachedSnapshot);
             break;
-        }
 
         default:
             break;
@@ -386,24 +430,15 @@ void SerialWorker::completeCurrentRequest(const QByteArray &frame)
             return;
         }
 
+        applyAcknowledgedWriteToCache();
         emit commandAcknowledged(m_currentRequest.description);
-
-        if (completedType == RequestType::WriteRange) {
-            m_currentRange =
-                (static_cast<quint8>(frame.at(4)) << 8)
-                | static_cast<quint8>(frame.at(5));
-        }
     }
 
     m_hasCurrentRequest = false;
 
-    // Every write is followed by one unified read, which both verifies the
-    // command and immediately refreshes all visible state.
-    if (function == 0x06) {
-        requestImmediatePoll();
-        return;
-    }
-
+    // Do not insert a verification read after writes. The high-speed V/I loop
+    // resumes immediately, and cached setpoint/output/range values are updated
+    // from the echoed Modbus acknowledgement.
     runNextRequest();
 }
 
@@ -436,8 +471,6 @@ void SerialWorker::scheduleNextPoll()
         return;
     }
 
-    // In Maximum mode this is a zero-interval timer. It yields to the Qt
-    // event loop and then starts the next Modbus transaction immediately.
     m_pollTimer->start(m_pollIntervalMs);
 }
 

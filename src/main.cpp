@@ -8,7 +8,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("RD6012P GUI Kuranda"));
     app.setOrganizationName(QStringLiteral("Kuranda"));
-    app.setApplicationVersion(QStringLiteral("0.2.1"));
+    app.setApplicationVersion(QStringLiteral("0.2.2"));
 
     QFont font(QStringLiteral("Segoe UI"));
     font.setPointSize(10);

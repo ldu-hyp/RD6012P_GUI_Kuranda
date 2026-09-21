@@ -44,8 +44,9 @@ private slots:
 private:
     enum class RequestType {
         DeviceInfo,
+        InitialState,
         Brightness,
-        UnifiedPoll,
+        FastVI,
         WriteVoltage,
         WriteCurrent,
         WriteOutput,
@@ -53,7 +54,7 @@ private:
     };
 
     struct Request {
-        RequestType type = RequestType::UnifiedPoll;
+        RequestType type = RequestType::FastVI;
         QByteArray frame;
         quint8 function = 0;
         quint16 startRegister = 0;
@@ -73,7 +74,8 @@ private:
     void scheduleNextPoll();
     int expectedFrameLength() const;
     void tryExtractFrame();
-    bool unifiedPollAlreadyPending() const;
+    bool fastVIPollAlreadyPending() const;
+    void applyAcknowledgedWriteToCache();
 
     QSerialPort *m_serial = nullptr;
     QTimer *m_timeoutTimer = nullptr;
@@ -90,6 +92,8 @@ private:
     int m_pollIntervalMs = 0;
     int m_currentRange = 0;
     int m_lastBacklight = -1;
+
+    DeviceSnapshot m_cachedSnapshot;
 
     QElapsedTimer m_rateClock;
     QElapsedTimer m_requestClock;

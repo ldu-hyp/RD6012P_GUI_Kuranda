@@ -53,14 +53,16 @@ void SerialWorker::openPort(const QString &portName)
     m_normalQueue.clear();
     m_hasCurrentRequest = false;
     m_connected = true;
-    m_lastTemperatureC = 0.0;
+    m_currentRange = 0;
+    m_cachedSnapshot = DeviceSnapshot{};
     m_rateSampleCount = 0;
     m_liveRateHz = 0.0;
 
+    m_statusClock.start();
+    m_setpointClock.start();
     m_temperatureClock.start();
     m_rateClock.start();
 
-    // Same probe observed from the official RIDEN host software.
     m_serial->write(QByteArrayLiteral("queryd\r\n"));
     m_serial->flush();
 
@@ -74,10 +76,17 @@ void SerialWorker::openPort(const QString &portName)
 
         enqueueRead(0x0000, 0x0004, RequestType::DeviceInfo,
                     tr("Read device information"), true);
-        enqueueRead(0x0048, 0x0001, RequestType::Brightness,
-                    tr("Read backlight"), false);
+
+        // Establish current range before decoding current-related values.
+        enqueueRead(0x000E, 0x0007, RequestType::StatusPoll,
+                    tr("Read status"), false);
+        enqueueRead(0x0008, 0x0002, RequestType::SetpointPoll,
+                    tr("Read setpoints"), false);
         enqueueRead(0x0004, 0x0002, RequestType::Temperature,
                     tr("Read internal temperature"), false);
+        enqueueRead(0x0048, 0x0001, RequestType::Brightness,
+                    tr("Read backlight"), false);
+
         runNextRequest();
     });
 }
@@ -101,15 +110,15 @@ void SerialWorker::closePort()
     }
 }
 
-bool SerialWorker::fastPollAlreadyPending() const
+bool SerialWorker::fastMeterAlreadyPending() const
 {
     if (m_hasCurrentRequest
-        && m_currentRequest.type == RequestType::FastPoll) {
+        && m_currentRequest.type == RequestType::FastMeter) {
         return true;
     }
 
     for (const Request &request : m_normalQueue) {
-        if (request.type == RequestType::FastPoll) {
+        if (request.type == RequestType::FastMeter) {
             return true;
         }
     }
@@ -124,12 +133,12 @@ void SerialWorker::requestImmediatePoll()
 
     m_pollTimer->stop();
 
-    if (!fastPollAlreadyPending()) {
-        // Compact high-rate block:
-        // 0x0008 VSET through 0x0014 current range.
-        // 13 registers -> 31 byte response instead of the old 81 byte frame.
-        enqueueRead(0x0008, 0x000D, RequestType::FastPoll,
-                    tr("Read live state"), false);
+    if (!fastMeterAlreadyPending()) {
+        // The hottest path reads only four registers:
+        // 0x000A VOUT, 0x000B IOUT, 0x000C..0x000D power.
+        // Response size is only 13 bytes.
+        enqueueRead(0x000A, 0x0004, RequestType::FastMeter,
+                    tr("Read meters"), false);
     }
     runNextRequest();
 }
@@ -213,7 +222,6 @@ void SerialWorker::enqueueWrite(quint16 reg, quint16 value,
     request.count = 1;
     request.description = description;
 
-    // User writes pre-empt the background acquisition loop.
     m_priorityQueue.enqueue(request);
     m_pollTimer->stop();
     runNextRequest();
@@ -314,6 +322,31 @@ void SerialWorker::tryExtractFrame()
     }
 }
 
+void SerialWorker::enqueueOneDueBackgroundRead()
+{
+    // Insert at most one slow read between meter frames. This avoids a burst
+    // of several slow transactions causing visible gaps in the graph.
+    if (m_statusClock.isValid()
+        && m_statusClock.elapsed() >= kStatusIntervalMs) {
+        enqueueRead(0x000E, 0x0007, RequestType::StatusPoll,
+                    tr("Read status"), false);
+        return;
+    }
+
+    if (m_setpointClock.isValid()
+        && m_setpointClock.elapsed() >= kSetpointIntervalMs) {
+        enqueueRead(0x0008, 0x0002, RequestType::SetpointPoll,
+                    tr("Read setpoints"), false);
+        return;
+    }
+
+    if (m_temperatureClock.isValid()
+        && m_temperatureClock.elapsed() >= kTemperatureIntervalMs) {
+        enqueueRead(0x0004, 0x0002, RequestType::Temperature,
+                    tr("Read internal temperature"), false);
+    }
+}
+
 void SerialWorker::completeCurrentRequest(const QByteArray &frame)
 {
     m_timeoutTimer->stop();
@@ -360,18 +393,33 @@ void SerialWorker::completeCurrentRequest(const QByteArray &frame)
         case RequestType::Temperature:
             if (regs.size() >= 2) {
                 const double sign = (regs.at(0) == 0) ? 1.0 : -1.0;
-                m_lastTemperatureC = sign * regs.at(1);
+                m_cachedSnapshot.internalTemperatureC = sign * regs.at(1);
                 m_temperatureClock.restart();
             }
             break;
 
-        case RequestType::FastPoll: {
-            DeviceSnapshot snapshot =
-                RidenProtocol::decodeLiveSnapshot(regs);
+        case RequestType::SetpointPoll:
+            RidenProtocol::applySetpointRegisters(
+                regs, m_currentRange, m_cachedSnapshot);
+            m_setpointClock.restart();
+            break;
 
-            m_currentRange = snapshot.currentRange;
-            snapshot.internalTemperatureC = m_lastTemperatureC;
-            snapshot.roundTripMs = roundTripMs;
+        case RequestType::StatusPoll:
+            RidenProtocol::applyStatusRegisters(regs, m_cachedSnapshot);
+            m_currentRange = m_cachedSnapshot.currentRange;
+            m_statusClock.restart();
+            break;
+
+        case RequestType::FastMeter: {
+            const DeviceSnapshot meter =
+                RidenProtocol::decodeMeterSnapshot(regs, m_currentRange);
+
+            m_cachedSnapshot.timestampMs = meter.timestampMs;
+            m_cachedSnapshot.voltageOut = meter.voltageOut;
+            m_cachedSnapshot.currentOut = meter.currentOut;
+            m_cachedSnapshot.powerOut = meter.powerOut;
+            m_cachedSnapshot.currentRange = m_currentRange;
+            m_cachedSnapshot.roundTripMs = roundTripMs;
 
             ++m_rateSampleCount;
             const qint64 rateElapsed = m_rateClock.elapsed();
@@ -382,9 +430,9 @@ void SerialWorker::completeCurrentRequest(const QByteArray &frame)
                 m_rateSampleCount = 0;
                 m_rateClock.restart();
             }
-            snapshot.updateRateHz = m_liveRateHz;
+            m_cachedSnapshot.updateRateHz = m_liveRateHz;
 
-            emit snapshotReceived(snapshot);
+            emit snapshotReceived(m_cachedSnapshot);
             break;
         }
 
@@ -393,11 +441,13 @@ void SerialWorker::completeCurrentRequest(const QByteArray &frame)
         }
     } else if (function == 0x06) {
         if (frame != m_currentRequest.frame) {
-            failCurrentRequest(tr("Write acknowledgement does not match request."));
+            failCurrentRequest(
+                tr("Write acknowledgement does not match request."));
             return;
         }
 
         emit commandAcknowledged(m_currentRequest.description);
+
         if (completedType == RequestType::WriteRange) {
             m_currentRange =
                 (static_cast<quint8>(frame.at(4)) << 8)
@@ -408,16 +458,27 @@ void SerialWorker::completeCurrentRequest(const QByteArray &frame)
     m_hasCurrentRequest = false;
 
     if (function == 0x06) {
-        // Verify a user write with the shortest possible live read.
-        requestImmediatePoll();
+        // Verify only the part affected by the write, then resume meters.
+        switch (completedType) {
+        case RequestType::WriteVoltage:
+        case RequestType::WriteCurrent:
+            enqueueRead(0x0008, 0x0002, RequestType::SetpointPoll,
+                        tr("Verify setpoints"), true);
+            break;
+        case RequestType::WriteOutput:
+        case RequestType::WriteRange:
+            enqueueRead(0x000E, 0x0007, RequestType::StatusPoll,
+                        tr("Verify status"), true);
+            break;
+        default:
+            break;
+        }
+        runNextRequest();
         return;
     }
 
-    if (completedType == RequestType::FastPoll
-        && m_temperatureClock.isValid()
-        && m_temperatureClock.elapsed() >= kTemperatureIntervalMs) {
-        enqueueRead(0x0004, 0x0002, RequestType::Temperature,
-                    tr("Read internal temperature"), false);
+    if (completedType == RequestType::FastMeter) {
+        enqueueOneDueBackgroundRead();
     }
 
     runNextRequest();
@@ -452,8 +513,6 @@ void SerialWorker::scheduleNextPoll()
         return;
     }
 
-    // A zero interval is intentional: QTimer posts the next transaction to
-    // the event loop, yielding to pending serial and command events first.
     m_pollTimer->start(m_pollIntervalMs);
 }
 

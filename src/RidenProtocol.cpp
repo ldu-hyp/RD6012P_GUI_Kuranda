@@ -143,37 +143,55 @@ DeviceInfo decodeDeviceInfo(const QVector<quint16> &registers)
     return info;
 }
 
-DeviceSnapshot decodeLiveSnapshot(const QVector<quint16> &r)
+DeviceSnapshot decodeMeterSnapshot(const QVector<quint16> &r,
+                                   int currentRange)
 {
     DeviceSnapshot s;
     s.timestampMs = QDateTime::currentMSecsSinceEpoch();
+    s.currentRange = currentRange;
 
-    // This optimized block is 0x0008..0x0014 (13 registers).
-    if (r.size() < 13) {
+    if (r.size() < 4) {
         return s;
     }
 
-    s.currentRange = static_cast<int>(r.at(12));
-    const double currentScale = (s.currentRange == 0) ? 10000.0 : 1000.0;
+    const double currentScale = (currentRange == 0) ? 10000.0 : 1000.0;
+    s.voltageOut = r.at(0) / 1000.0;
+    s.currentOut = r.at(1) / currentScale;
 
+    const quint32 powerRaw = (static_cast<quint32>(r.at(2)) << 16)
+                             | static_cast<quint32>(r.at(3));
+    s.powerOut = powerRaw / 100.0;
+    return s;
+}
+
+void applyStatusRegisters(const QVector<quint16> &r,
+                          DeviceSnapshot &s)
+{
+    // 0x000E..0x0014: VIN, lock, protection, CV/CC, output, preset, range.
+    if (r.size() < 7) {
+        return;
+    }
+
+    s.inputVoltage = r.at(0) / 100.0;
+    s.keypadLocked = r.at(1) != 0;
+    s.protection = static_cast<int>(r.at(2));
+    s.regulationMode = static_cast<int>(r.at(3));
+    s.outputEnabled = r.at(4) != 0;
+    s.preset = static_cast<int>(r.at(5));
+    s.currentRange = static_cast<int>(r.at(6));
+}
+
+void applySetpointRegisters(const QVector<quint16> &r,
+                            int currentRange,
+                            DeviceSnapshot &s)
+{
+    if (r.size() < 2) {
+        return;
+    }
+
+    const double currentScale = (currentRange == 0) ? 10000.0 : 1000.0;
     s.voltageSet = r.at(0) / 1000.0;
     s.currentSet = r.at(1) / currentScale;
-    s.voltageOut = r.at(2) / 1000.0;
-    s.currentOut = r.at(3) / currentScale;
-
-    // RD6012P power spans registers 0x000C..0x000D.
-    const quint32 powerRaw = (static_cast<quint32>(r.at(4)) << 16)
-                             | static_cast<quint32>(r.at(5));
-    s.powerOut = powerRaw / 100.0;
-
-    s.inputVoltage = r.at(6) / 100.0;
-    s.keypadLocked = r.at(7) != 0;
-    s.protection = static_cast<int>(r.at(8));
-    s.regulationMode = static_cast<int>(r.at(9));
-    s.outputEnabled = r.at(10) != 0;
-    s.preset = static_cast<int>(r.at(11));
-
-    return s;
 }
 
 QString protectionText(int protection)

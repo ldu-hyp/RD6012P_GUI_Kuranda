@@ -12,7 +12,10 @@ SerialWorker::SerialWorker(QObject *parent)
       m_pollTimer(new QTimer(this))
 {
     m_timeoutTimer->setSingleShot(true);
+    m_timeoutTimer->setTimerType(Qt::PreciseTimer);
+
     m_pollTimer->setSingleShot(true);
+    m_pollTimer->setTimerType(Qt::PreciseTimer);
 
     connect(m_serial, &QSerialPort::readyRead,
             this, &SerialWorker::onReadyRead);
@@ -50,8 +53,14 @@ void SerialWorker::openPort(const QString &portName)
     m_normalQueue.clear();
     m_hasCurrentRequest = false;
     m_connected = true;
+    m_lastTemperatureC = 0.0;
+    m_rateSampleCount = 0;
+    m_liveRateHz = 0.0;
 
-    // RIDEN PC software sends this ASCII probe before Modbus traffic.
+    m_temperatureClock.start();
+    m_rateClock.start();
+
+    // Same probe observed from the official RIDEN host software.
     m_serial->write(QByteArrayLiteral("queryd\r\n"));
     m_serial->flush();
 
@@ -62,10 +71,13 @@ void SerialWorker::openPort(const QString &portName)
         if (!m_connected) {
             return;
         }
+
         enqueueRead(0x0000, 0x0004, RequestType::DeviceInfo,
                     tr("Read device information"), true);
         enqueueRead(0x0048, 0x0001, RequestType::Brightness,
                     tr("Read backlight"), false);
+        enqueueRead(0x0004, 0x0002, RequestType::Temperature,
+                    tr("Read internal temperature"), false);
         runNextRequest();
     });
 }
@@ -89,27 +101,34 @@ void SerialWorker::closePort()
     }
 }
 
+bool SerialWorker::fastPollAlreadyPending() const
+{
+    if (m_hasCurrentRequest
+        && m_currentRequest.type == RequestType::FastPoll) {
+        return true;
+    }
+
+    for (const Request &request : m_normalQueue) {
+        if (request.type == RequestType::FastPoll) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void SerialWorker::requestImmediatePoll()
 {
     if (!m_connected) {
         return;
     }
+
     m_pollTimer->stop();
 
-    const auto alreadyQueued = [this]() {
-        if (m_hasCurrentRequest && m_currentRequest.type == RequestType::PollState) {
-            return true;
-        }
-        for (const Request &r : m_normalQueue) {
-            if (r.type == RequestType::PollState) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    if (!alreadyQueued()) {
-        enqueueRead(0x0004, 0x0026, RequestType::PollState,
+    if (!fastPollAlreadyPending()) {
+        // Compact high-rate block:
+        // 0x0008 VSET through 0x0014 current range.
+        // 13 registers -> 31 byte response instead of the old 81 byte frame.
+        enqueueRead(0x0008, 0x000D, RequestType::FastPoll,
                     tr("Read live state"), false);
     }
     runNextRequest();
@@ -151,7 +170,7 @@ void SerialWorker::setCurrentRange(int range)
 
 void SerialWorker::setPollInterval(int milliseconds)
 {
-    m_pollIntervalMs = qBound(20, milliseconds, 2000);
+    m_pollIntervalMs = qBound(0, milliseconds, 2000);
     if (m_connected && !m_hasCurrentRequest) {
         scheduleNextPoll();
     }
@@ -194,7 +213,7 @@ void SerialWorker::enqueueWrite(quint16 reg, quint16 value,
     request.count = 1;
     request.description = description;
 
-    // User commands always jump ahead of background polling.
+    // User writes pre-empt the background acquisition loop.
     m_priorityQueue.enqueue(request);
     m_pollTimer->stop();
     runNextRequest();
@@ -222,6 +241,8 @@ void SerialWorker::runNextRequest()
 void SerialWorker::transmitCurrentRequest()
 {
     m_rxBuffer.clear();
+    m_requestClock.restart();
+
     const qint64 queued = m_serial->write(m_currentRequest.frame);
     if (queued != m_currentRequest.frame.size()) {
         failCurrentRequest(tr("Unable to queue complete serial frame."));
@@ -266,7 +287,6 @@ int SerialWorker::expectedFrameLength() const
 void SerialWorker::tryExtractFrame()
 {
     while (m_hasCurrentRequest && !m_rxBuffer.isEmpty()) {
-        // Resynchronize to slave address if stray bytes are present.
         const int slavePos = m_rxBuffer.indexOf(
             static_cast<char>(RidenProtocol::kSlaveAddress));
         if (slavePos < 0) {
@@ -297,6 +317,8 @@ void SerialWorker::tryExtractFrame()
 void SerialWorker::completeCurrentRequest(const QByteArray &frame)
 {
     m_timeoutTimer->stop();
+    const double roundTripMs =
+        static_cast<double>(m_requestClock.elapsed());
 
     const quint8 function = static_cast<quint8>(frame.at(1));
     if (function & 0x80) {
@@ -313,6 +335,8 @@ void SerialWorker::completeCurrentRequest(const QByteArray &frame)
         return;
     }
 
+    const RequestType completedType = m_currentRequest.type;
+
     if (function == 0x03) {
         bool ok = false;
         const QVector<quint16> regs =
@@ -322,22 +346,48 @@ void SerialWorker::completeCurrentRequest(const QByteArray &frame)
             return;
         }
 
-        switch (m_currentRequest.type) {
+        switch (completedType) {
         case RequestType::DeviceInfo:
             emit deviceInfoReceived(RidenProtocol::decodeDeviceInfo(regs));
             break;
+
         case RequestType::Brightness:
             if (!regs.isEmpty()) {
                 m_lastBacklight = regs.first();
             }
             break;
-        case RequestType::PollState: {
-            const DeviceSnapshot snapshot =
-                RidenProtocol::decodeSnapshot(regs);
+
+        case RequestType::Temperature:
+            if (regs.size() >= 2) {
+                const double sign = (regs.at(0) == 0) ? 1.0 : -1.0;
+                m_lastTemperatureC = sign * regs.at(1);
+                m_temperatureClock.restart();
+            }
+            break;
+
+        case RequestType::FastPoll: {
+            DeviceSnapshot snapshot =
+                RidenProtocol::decodeLiveSnapshot(regs);
+
             m_currentRange = snapshot.currentRange;
+            snapshot.internalTemperatureC = m_lastTemperatureC;
+            snapshot.roundTripMs = roundTripMs;
+
+            ++m_rateSampleCount;
+            const qint64 rateElapsed = m_rateClock.elapsed();
+            if (rateElapsed >= 500) {
+                m_liveRateHz =
+                    static_cast<double>(m_rateSampleCount) * 1000.0
+                    / static_cast<double>(rateElapsed);
+                m_rateSampleCount = 0;
+                m_rateClock.restart();
+            }
+            snapshot.updateRateHz = m_liveRateHz;
+
             emit snapshotReceived(snapshot);
             break;
         }
+
         default:
             break;
         }
@@ -348,7 +398,7 @@ void SerialWorker::completeCurrentRequest(const QByteArray &frame)
         }
 
         emit commandAcknowledged(m_currentRequest.description);
-        if (m_currentRequest.type == RequestType::WriteRange) {
+        if (completedType == RequestType::WriteRange) {
             m_currentRange =
                 (static_cast<quint8>(frame.at(4)) << 8)
                 | static_cast<quint8>(frame.at(5));
@@ -357,12 +407,20 @@ void SerialWorker::completeCurrentRequest(const QByteArray &frame)
 
     m_hasCurrentRequest = false;
 
-    // After any write, verify the resulting state immediately.
     if (function == 0x06) {
+        // Verify a user write with the shortest possible live read.
         requestImmediatePoll();
-    } else {
-        runNextRequest();
+        return;
     }
+
+    if (completedType == RequestType::FastPoll
+        && m_temperatureClock.isValid()
+        && m_temperatureClock.elapsed() >= kTemperatureIntervalMs) {
+        enqueueRead(0x0004, 0x0002, RequestType::Temperature,
+                    tr("Read internal temperature"), false);
+    }
+
+    runNextRequest();
 }
 
 void SerialWorker::failCurrentRequest(const QString &reason)
@@ -393,6 +451,9 @@ void SerialWorker::scheduleNextPoll()
     if (!m_connected) {
         return;
     }
+
+    // A zero interval is intentional: QTimer posts the next transaction to
+    // the event loop, yielding to pending serial and command events first.
     m_pollTimer->start(m_pollIntervalMs);
 }
 

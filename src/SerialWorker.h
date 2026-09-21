@@ -6,7 +6,8 @@
 #include <QObject>
 #include <QQueue>
 #include <QSerialPort>
-#include <QTimer>
+
+class QTimer;
 
 class SerialWorker final : public QObject
 {
@@ -72,9 +73,11 @@ private:
     int expectedFrameLength() const;
     void tryExtractFrame();
 
-    QSerialPort m_serial;
-    QTimer m_timeoutTimer;
-    QTimer m_pollTimer;
+    // Heap-allocated QObject children move together with SerialWorker when it
+    // is moved to the dedicated serial thread.
+    QSerialPort *m_serial = nullptr;
+    QTimer *m_timeoutTimer = nullptr;
+    QTimer *m_pollTimer = nullptr;
 
     QByteArray m_rxBuffer;
     QQueue<Request> m_priorityQueue;

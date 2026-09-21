@@ -19,6 +19,7 @@
 #include <QStatusBar>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QtMath>
 
 namespace
 {
@@ -37,6 +38,13 @@ QString portDisplayName(const QSerialPortInfo &port)
         text += QStringLiteral(" — ") + port.description();
     }
     return text;
+}
+
+void setLabelTextIfChanged(QLabel *label, const QString &text)
+{
+    if (label->text() != text) {
+        label->setText(text);
+    }
 }
 }
 
@@ -305,11 +313,16 @@ QWidget *MainWindow::createRightPanel()
     auto *performanceGroup = new QGroupBox(tr("Acquisition"));
     auto *performanceForm = new QFormLayout(performanceGroup);
     m_pollCombo = new QComboBox;
-    m_pollCombo->addItem(tr("Ultra fast — 20 ms"), 20);
-    m_pollCombo->addItem(tr("Fast — 80 ms"), 80);
-    m_pollCombo->addItem(tr("Balanced — 200 ms"), 200);
-    m_pollCombo->addItem(tr("Slow — 1000 ms"), 1000);
-    performanceForm->addRow(tr("Poll delay"), m_pollCombo);
+    m_pollCombo->addItem(tr("Maximum — continuous"), 0);
+    m_pollCombo->addItem(tr("Fast — 20 ms idle"), 20);
+    m_pollCombo->addItem(tr("Balanced — 100 ms idle"), 100);
+    m_pollCombo->addItem(tr("Slow — 500 ms idle"), 500);
+
+    m_rateValue = makeInfoLabel();
+    m_rttValue = makeInfoLabel();
+    performanceForm->addRow(tr("Acquisition mode"), m_pollCombo);
+    performanceForm->addRow(tr("Actual update rate"), m_rateValue);
+    performanceForm->addRow(tr("Last round trip"), m_rttValue);
 
     connect(m_pollCombo, &QComboBox::currentIndexChanged,
             this, [this](int index) {
@@ -556,6 +569,13 @@ void MainWindow::onConnectionChanged(bool connected,
     if (!connected) {
         m_outputButton->setChecked(false);
         m_outputButton->setText(tr("OUTPUT OFF"));
+        m_lastCurrentRange = -1;
+        if (m_rateValue) {
+            m_rateValue->setText(QStringLiteral("--"));
+        }
+        if (m_rttValue) {
+            m_rttValue->setText(QStringLiteral("--"));
+        }
     }
 }
 
@@ -580,42 +600,77 @@ void MainWindow::onDeviceInfo(const DeviceInfo &info)
 
 void MainWindow::onSnapshot(const DeviceSnapshot &s)
 {
-    m_voltageValue->setText(
-        QString::number(s.voltageOut, 'f', 3));
-    m_currentValue->setText(
+    // The high-rate path touches only widgets whose displayed value changed.
+    // Avoiding unconditional setText()/setValue() calls substantially reduces
+    // layout/style work when the acquisition loop runs back-to-back.
+    setLabelTextIfChanged(
+        m_voltageValue, QString::number(s.voltageOut, 'f', 3));
+    setLabelTextIfChanged(
+        m_currentValue,
         QString::number(s.currentOut, 'f',
                         s.currentRange == 0 ? 4 : 3));
-    m_powerValue->setText(
-        QString::number(s.powerOut, 'f', 2));
+    setLabelTextIfChanged(
+        m_powerValue, QString::number(s.powerOut, 'f', 2));
 
     m_plot->addSample(s.voltageOut, s.currentOut, s.powerOut);
 
-    m_inputVoltageValue->setText(
+    setLabelTextIfChanged(
+        m_rateValue,
+        s.updateRateHz > 0.0
+            ? QStringLiteral("%1 Hz").arg(s.updateRateHz, 0, 'f', 1)
+            : QStringLiteral("measuring..."));
+    setLabelTextIfChanged(
+        m_rttValue,
+        QStringLiteral("%1 ms").arg(s.roundTripMs, 0, 'f', 0));
+
+    setLabelTextIfChanged(
+        m_inputVoltageValue,
         QStringLiteral("%1 V").arg(s.inputVoltage, 0, 'f', 2));
-    m_temperatureValue->setText(
+    setLabelTextIfChanged(
+        m_temperatureValue,
         QStringLiteral("%1 °C").arg(s.internalTemperatureC, 0, 'f', 0));
-    m_modeValue->setText(RidenProtocol::regulationText(s.regulationMode));
-    m_protectionValue->setText(
-        RidenProtocol::protectionText(s.protection));
-    m_presetValue->setText(QStringLiteral("M%1").arg(s.preset));
-    m_lockValue->setText(s.keypadLocked ? tr("Locked")
-                                        : tr("Unlocked"));
+    setLabelTextIfChanged(
+        m_modeValue, RidenProtocol::regulationText(s.regulationMode));
+    setLabelTextIfChanged(
+        m_protectionValue, RidenProtocol::protectionText(s.protection));
+    setLabelTextIfChanged(
+        m_presetValue, QStringLiteral("M%1").arg(s.preset));
+    setLabelTextIfChanged(
+        m_lockValue, s.keypadLocked ? tr("Locked") : tr("Unlocked"));
 
     m_updatingControls = true;
-    m_voltageSet->setValue(s.voltageSet);
 
-    if (m_rangeCombo->currentData().toInt() != s.currentRange) {
+    // Never fight the user while a set-point editor has focus.
+    if (!m_voltageSet->hasFocus()
+        && qAbs(m_voltageSet->value() - s.voltageSet) >= 0.0005) {
+        m_voltageSet->setValue(s.voltageSet);
+    }
+
+    if (m_lastCurrentRange != s.currentRange) {
+        m_lastCurrentRange = s.currentRange;
         const int index = m_rangeCombo->findData(s.currentRange);
-        if (index >= 0) {
+        if (index >= 0 && m_rangeCombo->currentIndex() != index) {
             m_rangeCombo->setCurrentIndex(index);
         }
+        updateCurrentSpinResolution(s.currentRange);
     }
-    updateCurrentSpinResolution(s.currentRange);
-    m_currentSet->setValue(s.currentSet);
 
-    m_outputButton->setChecked(s.outputEnabled);
-    m_outputButton->setText(
-        s.outputEnabled ? tr("OUTPUT ON") : tr("OUTPUT OFF"));
+    const double currentThreshold =
+        (s.currentRange == 0) ? 0.00005 : 0.0005;
+    if (!m_currentSet->hasFocus()
+        && qAbs(m_currentSet->value() - s.currentSet) >= currentThreshold) {
+        m_currentSet->setValue(s.currentSet);
+    }
+
+    if (m_outputButton->isChecked() != s.outputEnabled) {
+        m_outputButton->setChecked(s.outputEnabled);
+    }
+    const QString outputText =
+        s.outputEnabled ? tr("OUTPUT ON") : tr("OUTPUT OFF");
+    if (m_outputButton->text() != outputText) {
+        m_outputButton->setText(outputText);
+    }
+
     m_updatingControls = false;
 }
 

@@ -2,46 +2,49 @@
 
 #include "RidenProtocol.h"
 
-#include <QSerialPortInfo>
+#include <QTimer>
 #include <QtMath>
 
 SerialWorker::SerialWorker(QObject *parent)
-    : QObject(parent)
+    : QObject(parent),
+      m_serial(new QSerialPort(this)),
+      m_timeoutTimer(new QTimer(this)),
+      m_pollTimer(new QTimer(this))
 {
-    m_timeoutTimer.setSingleShot(true);
-    m_pollTimer.setSingleShot(true);
+    m_timeoutTimer->setSingleShot(true);
+    m_pollTimer->setSingleShot(true);
 
-    connect(&m_serial, &QSerialPort::readyRead,
+    connect(m_serial, &QSerialPort::readyRead,
             this, &SerialWorker::onReadyRead);
-    connect(&m_serial, &QSerialPort::errorOccurred,
+    connect(m_serial, &QSerialPort::errorOccurred,
             this, &SerialWorker::onSerialError);
-    connect(&m_timeoutTimer, &QTimer::timeout,
+    connect(m_timeoutTimer, &QTimer::timeout,
             this, &SerialWorker::onRequestTimeout);
-    connect(&m_pollTimer, &QTimer::timeout,
+    connect(m_pollTimer, &QTimer::timeout,
             this, &SerialWorker::onPollTimer);
 }
 
 void SerialWorker::openPort(const QString &portName)
 {
-    if (m_serial.isOpen()) {
+    if (m_serial->isOpen()) {
         closePort();
     }
 
-    m_serial.setPortName(portName);
-    m_serial.setBaudRate(RidenProtocol::kBaudRate);
-    m_serial.setDataBits(QSerialPort::Data8);
-    m_serial.setParity(QSerialPort::NoParity);
-    m_serial.setStopBits(QSerialPort::OneStop);
-    m_serial.setFlowControl(QSerialPort::NoFlowControl);
+    m_serial->setPortName(portName);
+    m_serial->setBaudRate(RidenProtocol::kBaudRate);
+    m_serial->setDataBits(QSerialPort::Data8);
+    m_serial->setParity(QSerialPort::NoParity);
+    m_serial->setStopBits(QSerialPort::OneStop);
+    m_serial->setFlowControl(QSerialPort::NoFlowControl);
 
-    if (!m_serial.open(QIODevice::ReadWrite)) {
+    if (!m_serial->open(QIODevice::ReadWrite)) {
         emit connectionChanged(false,
                                tr("Open %1 failed: %2")
-                                   .arg(portName, m_serial.errorString()));
+                                   .arg(portName, m_serial->errorString()));
         return;
     }
 
-    m_serial.clear();
+    m_serial->clear();
     m_rxBuffer.clear();
     m_priorityQueue.clear();
     m_normalQueue.clear();
@@ -49,8 +52,8 @@ void SerialWorker::openPort(const QString &portName)
     m_connected = true;
 
     // RIDEN PC software sends this ASCII probe before Modbus traffic.
-    m_serial.write(QByteArrayLiteral("queryd\r\n"));
-    m_serial.flush();
+    m_serial->write(QByteArrayLiteral("queryd\r\n"));
+    m_serial->flush();
 
     emit connectionChanged(true,
                            tr("%1 @ 115200 8N1").arg(portName));
@@ -69,15 +72,15 @@ void SerialWorker::openPort(const QString &portName)
 
 void SerialWorker::closePort()
 {
-    m_pollTimer.stop();
-    m_timeoutTimer.stop();
+    m_pollTimer->stop();
+    m_timeoutTimer->stop();
     m_priorityQueue.clear();
     m_normalQueue.clear();
     m_rxBuffer.clear();
     m_hasCurrentRequest = false;
 
-    if (m_serial.isOpen()) {
-        m_serial.close();
+    if (m_serial->isOpen()) {
+        m_serial->close();
     }
 
     if (m_connected) {
@@ -91,7 +94,7 @@ void SerialWorker::requestImmediatePoll()
     if (!m_connected) {
         return;
     }
-    m_pollTimer.stop();
+    m_pollTimer->stop();
 
     const auto alreadyQueued = [this]() {
         if (m_hasCurrentRequest && m_currentRequest.type == RequestType::PollState) {
@@ -193,7 +196,7 @@ void SerialWorker::enqueueWrite(quint16 reg, quint16 value,
 
     // User commands always jump ahead of background polling.
     m_priorityQueue.enqueue(request);
-    m_pollTimer.stop();
+    m_pollTimer->stop();
     runNextRequest();
 }
 
@@ -219,19 +222,19 @@ void SerialWorker::runNextRequest()
 void SerialWorker::transmitCurrentRequest()
 {
     m_rxBuffer.clear();
-    const qint64 queued = m_serial.write(m_currentRequest.frame);
+    const qint64 queued = m_serial->write(m_currentRequest.frame);
     if (queued != m_currentRequest.frame.size()) {
         failCurrentRequest(tr("Unable to queue complete serial frame."));
         return;
     }
 
-    m_serial.flush();
-    m_timeoutTimer.start(kRequestTimeoutMs);
+    m_serial->flush();
+    m_timeoutTimer->start(kRequestTimeoutMs);
 }
 
 void SerialWorker::onReadyRead()
 {
-    m_rxBuffer.append(m_serial.readAll());
+    m_rxBuffer.append(m_serial->readAll());
     tryExtractFrame();
 }
 
@@ -293,7 +296,7 @@ void SerialWorker::tryExtractFrame()
 
 void SerialWorker::completeCurrentRequest(const QByteArray &frame)
 {
-    m_timeoutTimer.stop();
+    m_timeoutTimer->stop();
 
     const quint8 function = static_cast<quint8>(frame.at(1));
     if (function & 0x80) {
@@ -345,7 +348,6 @@ void SerialWorker::completeCurrentRequest(const QByteArray &frame)
         }
 
         emit commandAcknowledged(m_currentRequest.description);
-        // Reflect user commands quickly instead of waiting for the normal cadence.
         if (m_currentRequest.type == RequestType::WriteRange) {
             m_currentRange =
                 (static_cast<quint8>(frame.at(4)) << 8)
@@ -365,7 +367,7 @@ void SerialWorker::completeCurrentRequest(const QByteArray &frame)
 
 void SerialWorker::failCurrentRequest(const QString &reason)
 {
-    m_timeoutTimer.stop();
+    m_timeoutTimer->stop();
 
     if (m_hasCurrentRequest && m_currentRequest.retryCount < 1) {
         ++m_currentRequest.retryCount;
@@ -391,7 +393,7 @@ void SerialWorker::scheduleNextPoll()
     if (!m_connected) {
         return;
     }
-    m_pollTimer.start(m_pollIntervalMs);
+    m_pollTimer->start(m_pollIntervalMs);
 }
 
 void SerialWorker::onPollTimer()
@@ -406,8 +408,8 @@ void SerialWorker::onSerialError(QSerialPort::SerialPortError error)
         return;
     }
 
-    const QString message = m_serial.errorString();
-    if (m_serial.isOpen()) {
+    const QString message = m_serial->errorString();
+    if (m_serial->isOpen()) {
         closePort();
     }
     emit protocolError(tr("Serial port error: %1").arg(message));

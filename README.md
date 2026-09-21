@@ -95,7 +95,7 @@ Polling is transaction-driven rather than blindly timer-driven: a new read is on
 
 User writes are placed in a priority queue. A voltage/current/output command therefore runs before the next background state read, and the application requests an immediate verification poll after the write acknowledgement.
 
-The default poll delay is 80 ms. Actual update rate is limited by the RD6012P response latency plus this delay; it never sends overlapping Modbus requests.
+The default poll delay is 20 ms. Actual update rate is limited by the RD6012P response latency plus this delay; it never sends overlapping Modbus requests.
 
 ## Important
 

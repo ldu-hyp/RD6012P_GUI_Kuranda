@@ -391,6 +391,9 @@ void SerialWorker::completeCurrentRequest(const QByteArray &frame)
             m_cachedSnapshot = RidenProtocol::decodeInitialSnapshot(regs);
             m_currentRange = m_cachedSnapshot.currentRange;
             m_cachedSnapshot.roundTripMs = roundTripMs;
+            m_rateSampleCount = 0;
+            m_liveRateHz = 0.0;
+            m_rateClock.restart();
             emit snapshotReceived(m_cachedSnapshot);
             break;
 
